@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 import streamlit as st
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 st.set_page_config(
     page_title="Improvement Opportunity Form", page_icon="💡", layout="wide"
@@ -29,7 +31,28 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# تحميل الورش والخطوط من الملف الأصلي
+# --- الاتصال بقاعدة بيانات Google Sheets ---
+@st.cache_resource
+def init_connection():
+  scope = [
+      "https://spreadsheets.google.com/feeds",
+      "https://www.googleapis.com/auth/drive",
+  ]
+  # التأكد من وجود ملف الـ credentials.json
+  creds = ServiceAccountCredentials.from_json_keyfile_name(
+      "credentials.json", scope
+  )
+  client = gspread.authorize(creds)
+  # اكتب هنا اسم ملف جوجل شيت الذي أنشأته تماماً
+  sheet = client.open("Improvement_Database").sheet1
+  return sheet
+
+try:
+  sheet = init_connection()
+except Exception as e:
+  st.error(f"خطأ في الاتصال بقاعدة البيانات السحابية: {e}")
+
+# تحميل الورش والخطوط من الملف المحلي أو الافتراضي
 @st.cache_data
 def load_excel_data():
   try:
@@ -54,14 +77,9 @@ with st.form("kaizen_form"):
   with col2:
     emp_job = st.text_input("الوظيفة / Job Title")
 
-    # استخراج الخطوط والورش من ملف الأكسل بدون اختيار افتراضي
     if df_kaizen is not None:
-      lines = (
-          df_kaizen["Line"].dropna().astype(str).unique().tolist()
-      )
-      workshops = (
-          df_kaizen["Workshop"].dropna().astype(str).unique().tolist()
-      )
+      lines = df_kaizen["Line"].dropna().astype(str).unique().tolist()
+      workshops = df_kaizen["Workshop"].dropna().astype(str).unique().tolist()
 
       selected_line = st.selectbox(
           "الخط / Line", lines, index=None, placeholder="اختر الخط / Select Line"
@@ -76,7 +94,6 @@ with st.form("kaizen_form"):
   problem_desc = st.text_area("شرح المشكلة / Problem Description")
   solution_desc = st.text_area("شرح الفكرة / الحل - Idea / Solution Description")
 
-  # --- خانة رفع الصورة التوضيحية للمشكلة ---
   uploaded_image = st.file_uploader(
       "صورة توضيحية للمشكلة / Problem Illustration Image",
       type=["jpg", "png", "jpeg"],
@@ -84,7 +101,6 @@ with st.form("kaizen_form"):
 
   st.markdown("---")
 
-  # 1. التأثير على عوامل التحسين (الـ 6 عناصر)
   st.markdown("**التأثير على عوامل التحسين (اختر واحد أو أكثر) / Improvement Factors:**")
   col_f1, col_f2 = st.columns(2)
   with col_f1:
@@ -98,7 +114,6 @@ with st.form("kaizen_form"):
 
   st.markdown("---")
 
-  # 2. التأثير على الفواقد (الـ 8 عناصر)
   st.markdown("**التأثير على الفواقد (اختر واحد أو أكثر) / Waste Impact:**")
   col_w1, col_w2 = st.columns(2)
   with col_w1:
@@ -120,59 +135,59 @@ with st.form("kaizen_form"):
     elif not selected_line or not selected_workshop:
       st.warning("يرجى اختيار الخط والورشة. / Please select line and workshop.")
     else:
-      output_file = "Improvement_Submitted_Data.xlsx"
       os.makedirs("improvement_images", exist_ok=True)
-
       image_path = "لا يوجد / None"
       if uploaded_image is not None:
         image_path = os.path.join("improvement_images", uploaded_image.name)
         with open(image_path, "wb") as f:
           f.write(uploaded_image.getbuffer())
 
-      if os.path.exists(output_file):
-        df_existing = pd.read_excel(output_file)
-        if (
-            not df_existing.empty
-            and "كود الفرصة" in df_existing.columns
-        ):
-          next_code = int(df_existing["كود الفرصة"].max()) + 1
+      # حساب الكود التالي تلقائياً من جوجل شيت
+      try:
+        existing_data = sheet.get_all_records()
+        if existing_data:
+          df_existing = pd.DataFrame(existing_data)
+          if "كود الفرصة" in df_existing.columns and not df_existing["كود الفرصة"].empty:
+            # تنظيف القيم وتحويلها لرقم لتجنب الأخطاء
+            max_val = pd.to_numeric(df_existing["كود الفرصة"], errors='coerce').max()
+            next_code = int(max_val) + 1 if pd.notna(max_val) else 11411
+          else:
+            next_code = 11411
         else:
           next_code = 11411
-      else:
-        df_existing = pd.DataFrame()
+      except:
         next_code = 11411
 
-      submission_data = {
-          "كود الفرصة": next_code,
-          "التاريخ": str(date),
-          "اسم الموظف": emp_name,
-          "الكود الوظيفي": emp_code,
-          "الوظيفة": emp_job,
-          "الخط": selected_line,
-          "الورشة": selected_workshop,
-          "شرح المشكلة": problem_desc,
-          "شرح الفكرة / الحل": solution_desc,
-          "مسار الصورة": image_path,
-          "السلامة والصحة المهنية": "نعم" if factor_safety else "لا",
-          "الجودة": "نعم" if factor_quality else "لا",
-          "الإنتاج": "نعم" if factor_prod else "لا",
-          "التكلفة": "نعم" if factor_cost else "لا",
-          "5S": "نعم" if factor_5s else "لا",
-          "توظيف الحركة - إرجونومكس": "نعم" if factor_ergonomics else "لا",
-          "العيوب": "نعم" if waste_defects else "لا",
-          "الإنتاج الزائد": "نعم" if waste_overproduction else "لا",
-          "الانتظار": "نعم" if waste_waiting else "لا",
-          "المهارات الغير مستغلة": "نعم" if waste_skills else "لا",
-          "النقل": "نعم" if waste_transport else "لا",
-          "المخزون": "نعم" if waste_inventory else "لا",
-          "الحركة": "نعم" if waste_motion else "لا",
-          "الإفراط في التشغيل": "نعم" if waste_overprocessing else "لا",
-      }
+      row_data = [
+          next_code,
+          str(date),
+          emp_name,
+          str(emp_code),
+          emp_job,
+          str(selected_line),
+          str(selected_workshop),
+          problem_desc,
+          solution_desc,
+          image_path,
+          "نعم" if factor_safety else "لا",
+          "نعم" if factor_quality else "لا",
+          "نعم" if factor_prod else "لا",
+          "نعم" if factor_cost else "لا",
+          "نعم" if factor_5s else "لا",
+          "نعم" if factor_ergonomics else "لا",
+          "نعم" if waste_defects else "لا",
+          "نعم" if waste_overproduction else "لا",
+          "نعم" if waste_waiting else "لا",
+          "نعم" if waste_skills else "لا",
+          "نعم" if waste_transport else "لا",
+          "نعم" if waste_inventory else "لا",
+          "نعم" if waste_motion else "لا",
+          "نعم" if waste_overprocessing else "لا",
+      ]
 
-      df_new = pd.DataFrame([submission_data])
-      df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-      df_combined.to_excel(output_file, index=False)
+      # إضافة الصف الجديد مباشرة إلى جوجل شيت السحابي
+      sheet.append_row(row_data)
 
       st.success(
-          f"✅ تم حفظ استمارة فرصة التحسين بنجاح برقم الكود: **{next_code}** 🎉"
+          f"✅ تم حفظ استمارة فرصة التحسين بنجاح في السحابة برقم الكود: **{next_code}** 🎉"
       )
